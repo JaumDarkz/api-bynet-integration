@@ -29,10 +29,8 @@ const sendToUtmify = async (payload) => {
   }
 };
 
-// Armazenamento temporário para UTM parameters
 const utmStore = {};
 
-// Endpoint para gerar PIX
 app.post('/gerar-pix', async (req, res) => {
   const {
     amount,
@@ -79,7 +77,6 @@ app.post('/gerar-pix', async (req, res) => {
 
     const pixData = pixResponse.data;
 
-    // Salva os UTMs temporariamente
     utmStore[pixData.id] = {
       utm_source,
       utm_campaign,
@@ -142,7 +139,6 @@ app.post('/gerar-pix', async (req, res) => {
   }
 });
 
-// Endpoint para verificar status de pagamento
 app.get('/status-pagamento/:id', async (req, res) => {
   const { id } = req.params;
 
@@ -222,6 +218,87 @@ app.get('/status-pagamento/:id', async (req, res) => {
     });
   }
 });
+
+app.post('/webhook-pagamento', async (req, res) => {
+  try {
+    const { id, status, paidAt } = req.body;
+
+    // Verifica se os dados são válidos
+    if (!id || !status) {
+      return res.status(400).json({ error: 'Dados inválidos no webhook' });
+    }
+
+    console.log(`Recebido webhook para ID: ${id} com status: ${status}`);
+
+    // Caso o status seja 'paid', envie para a Utmify
+    if (status === 'paid') {
+      const transactionResponse = await axios.get(
+        `https://api.bynetglobal.com.br/v1/transactions/${id}`,
+        {
+          headers: {
+            Authorization: getAuthHeader(),
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+
+      const transaction = transactionResponse.data;
+
+      const customerIp = transaction.customer?.ip || '0.0.0.0';
+      const utms = utmStore[id] || {};
+
+      const utmifyPayload = {
+        orderId: transaction.id,
+        platform: 'GlobalPay',
+        paymentMethod: 'pix',
+        status: 'paid',
+        createdAt: new Date(transaction.createdAt).toISOString().replace('T', ' ').slice(0, 19),
+        approvedDate: new Date(transaction.paidAt || paidAt).toISOString().replace('T', ' ').slice(0, 19),
+        refundedAt: null,
+        customer: {
+          name: transaction.customer.name,
+          email: transaction.customer.email,
+          phone: transaction.customer.phone || null,
+          document: transaction.customer.document.number,
+          country: 'BR',
+          ip: customerIp,
+        },
+        products: transaction.items.map((item) => ({
+          id: item.id || Math.random().toString(36).substring(7),
+          name: item.title,
+          planId: null,
+          planName: null,
+          quantity: item.quantity,
+          priceInCents: item.unitPrice,
+        })),
+        trackingParameters: {
+          src: null,
+          sck: null,
+          utm_source: utms.utm_source || null,
+          utm_campaign: utms.utm_campaign || null,
+          utm_medium: utms.utm_medium || null,
+          utm_content: utms.utm_content || null,
+          utm_term: null,
+        },
+        commission: {
+          totalPriceInCents: transaction.amount,
+          gatewayFeeInCents: transaction.fee?.fixedAmount || 0,
+          userCommissionInCents: transaction.amount - (transaction.fee?.fixedAmount || 0),
+        },
+        isTest: false,
+      };
+
+      await sendToUtmify(utmifyPayload);
+      console.log('Venda enviada com sucesso para a Utmify via webhook');
+    }
+
+    res.status(200).json({ message: 'Webhook recebido com sucesso' });
+  } catch (error) {
+    console.error('Erro ao processar webhook:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Erro interno ao processar webhook' });
+  }
+});
+
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
